@@ -2,22 +2,29 @@ import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 import { get } from "./database";
 
-const SECRET = process.env.JWT_SECRET || process.env.SESSION_SECRET;
-if (!SECRET) {
-  throw new Error("JWT_SECRET or SESSION_SECRET environment variable must be set");
+const DEV_SECRET = "dev-secret-do-not-use-in-production";
+
+function getSecret(): string {
+  const secret = process.env.JWT_SECRET || process.env.SESSION_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET or SESSION_SECRET environment variable must be set in production");
+  }
+  return DEV_SECRET;
 }
+
 const EXPIRY = process.env.JWT_EXPIRY || "24h";
 
 export function generateAccessToken(userId: string, email: string): string {
-  return jwt.sign({ userId, email, type: "access" }, SECRET, { expiresIn: EXPIRY, algorithm: "HS256" });
+  return jwt.sign({ userId, email, type: "access" }, getSecret(), { expiresIn: EXPIRY, algorithm: "HS256" });
 }
 
 export function generateRefreshToken(userId: string): string {
-  return jwt.sign({ userId, type: "refresh" }, SECRET, { expiresIn: "30d", algorithm: "HS256" });
+  return jwt.sign({ userId, type: "refresh" }, getSecret(), { expiresIn: "30d", algorithm: "HS256" });
 }
 
 export function verifyToken(token: string): any {
-  return jwt.verify(token, SECRET, { algorithms: ["HS256"] });
+  return jwt.verify(token, getSecret(), { algorithms: ["HS256"] });
 }
 
 export interface AuthenticatedRequest extends Request {
