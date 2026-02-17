@@ -16,9 +16,25 @@ export function getConnection(): Connection {
   return _connection;
 }
 
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, delayMs = 1000): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      if (attempt < maxRetries - 1) {
+        const backoff = delayMs * Math.pow(2, attempt);
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export async function getSolBalance(publicKey: string): Promise<number> {
   try {
-    const bal = await getConnection().getBalance(new PublicKey(publicKey));
+    const bal = await withRetry(() => getConnection().getBalance(new PublicKey(publicKey)));
     return bal / LAMPORTS_PER_SOL;
   } catch {
     return 0;
@@ -26,13 +42,28 @@ export async function getSolBalance(publicKey: string): Promise<number> {
 }
 
 export async function getMultipleBalances(publicKeys: string[]): Promise<Array<{ publicKey: string; balance: number }>> {
-  const results = await Promise.allSettled(
-    publicKeys.map((pk) => getConnection().getBalance(new PublicKey(pk)))
-  );
-  return publicKeys.map((pk, i) => ({
-    publicKey: pk,
-    balance: results[i].status === "fulfilled" ? (results[i] as PromiseFulfilledResult<number>).value / LAMPORTS_PER_SOL : 0,
-  }));
+  try {
+    const pubkeys = publicKeys.map((pk) => new PublicKey(pk));
+    const accountInfos = await withRetry(() => getConnection().getMultipleAccountsInfo(pubkeys));
+
+    return publicKeys.map((pk, i) => ({
+      publicKey: pk,
+      balance: accountInfos[i] ? accountInfos[i]!.lamports / LAMPORTS_PER_SOL : 0,
+    }));
+  } catch (batchError: any) {
+    console.warn("Batch balance fetch failed, falling back to individual calls:", batchError.message);
+
+    const results = await Promise.allSettled(
+      publicKeys.map((pk) =>
+        withRetry(() => getConnection().getBalance(new PublicKey(pk)))
+      )
+    );
+
+    return publicKeys.map((pk, i) => ({
+      publicKey: pk,
+      balance: results[i].status === "fulfilled" ? (results[i] as PromiseFulfilledResult<number>).value / LAMPORTS_PER_SOL : 0,
+    }));
+  }
 }
 
 export async function sendSol(
@@ -42,7 +73,7 @@ export async function sendSol(
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const conn = getConnection();
-    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
+    const { blockhash, lastValidBlockHeight } = await withRetry(() => conn.getLatestBlockhash());
     const tx = new Transaction({
       recentBlockhash: blockhash,
       feePayer: fromKeypair.publicKey,

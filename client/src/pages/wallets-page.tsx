@@ -50,30 +50,26 @@ export default function WalletsPage() {
   const [showKeys, setShowKeys] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
 
-  const fetchWallets = () => {
-    setLoading(true);
-    apiClient
-      .get("/wallets")
-      .then((r) => setWallets(r.data.wallets || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
-
-  const syncBalances = () => {
+  const syncBalances = (showToast = false) => {
     setSyncing(true);
     apiClient
       .get("/wallets/balances")
       .then((r) => {
         setWallets(r.data.wallets || []);
         setTotalSol(r.data.totalSol || 0);
-        toast({ title: "Balances synced" });
+        if (showToast) toast({ title: "Balances synced" });
       })
-      .catch(() => toast({ title: "Sync failed", variant: "destructive" }))
-      .finally(() => setSyncing(false));
+      .catch(() => {
+        if (showToast) toast({ title: "Sync failed", variant: "destructive" });
+      })
+      .finally(() => {
+        setSyncing(false);
+        setLoading(false);
+      });
   };
 
   useEffect(() => {
-    syncBalances();
+    syncBalances(false);
   }, []);
 
   const copyToClipboard = (text: string, label: string) => {
@@ -131,7 +127,7 @@ export default function WalletsPage() {
             variant="secondary"
             size="sm"
             className="font-mono text-xs gap-1"
-            onClick={syncBalances}
+            onClick={() => syncBalances(true)}
             disabled={syncing}
             data-testid="button-sync-balances"
           >

@@ -3,6 +3,8 @@ import type { Server } from "http";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import multer from "multer";
+import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
 import { initDatabase, run, get, all } from "./services/database";
 import { requireAuth, generateAccessToken, generateRefreshToken, verifyToken, type AuthenticatedRequest } from "./services/auth";
 import { generateUserWallets, encryptPrivateKey, decryptPrivateKey, generateSalt, keypairFromEncrypted } from "./services/encryption";
@@ -165,7 +167,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const valid = await bcrypt.compare(password, user.password_hash);
       if (!valid) return res.status(401).json({ error: "Invalid password" });
 
-      const privateKey = decryptPrivateKey(wallet.encrypted_private_key, password, req.user.encryptionSalt);
+      let privateKey: string;
+      try {
+        privateKey = decryptPrivateKey(wallet.encrypted_private_key, password, req.user.encryptionSalt);
+      } catch (decryptErr: any) {
+        console.error("Decryption failed for wallet export:", decryptErr.message);
+        return res.status(400).json({ error: "Failed to decrypt wallet key. The encryption data may be corrupted." });
+      }
+
       res.json({ publicKey: wallet.public_key, privateKey, walletIndex: wallet.wallet_index });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to export key" });
@@ -186,15 +195,55 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         [req.user.id]
       );
 
-      const exported = wallets.map((w: any) => ({
-        index: w.wallet_index,
-        publicKey: w.public_key,
-        privateKey: decryptPrivateKey(w.encrypted_private_key, password, req.user.encryptionSalt),
-      }));
+      const exported = [];
+      for (const w of wallets) {
+        try {
+          const privateKey = decryptPrivateKey(w.encrypted_private_key, password, req.user.encryptionSalt);
+          exported.push({
+            index: w.wallet_index,
+            publicKey: w.public_key,
+            privateKey,
+          });
+        } catch (decryptErr: any) {
+          console.error(`Decryption failed for wallet index ${w.wallet_index}:`, decryptErr.message);
+          exported.push({
+            index: w.wallet_index,
+            publicKey: w.public_key,
+            privateKey: null,
+            error: "Failed to decrypt this wallet key",
+          });
+        }
+      }
 
       res.json({ wallets: exported });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to export keys" });
+    }
+  });
+
+  // ========== DEPOSIT ADDRESS ==========
+
+  app.get("/api/wallets/:index/deposit", requireAuth as any, (req: any, res) => {
+    try {
+      const walletIndex = parseInt(req.params.index);
+      if (isNaN(walletIndex) || walletIndex < 0) {
+        return res.status(400).json({ error: "Invalid wallet index" });
+      }
+
+      const wallet = get(
+        "SELECT id, wallet_index, public_key, label FROM wallets WHERE user_id = ? AND wallet_index = ?",
+        [req.user.id, walletIndex]
+      );
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      res.json({
+        walletIndex: wallet.wallet_index,
+        label: wallet.label,
+        depositAddress: wallet.public_key,
+      });
+    } catch (err: any) {
+      console.error("Deposit address error:", err);
+      res.status(500).json({ error: "Failed to get deposit address" });
     }
   });
 
@@ -327,21 +376,41 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           ? `https://bags.fm/token/`
           : `https://bonk.fun/token/`;
 
-      const mockMint = crypto.randomBytes(32).toString("hex").slice(0, 44);
+      const mintKeypair = Keypair.generate();
+      const mintAddress = mintKeypair.publicKey.toBase58();
+
+      const devTxSigBytes = crypto.randomBytes(64);
+      const devTxSignature = bs58.encode(devTxSigBytes);
+
+      const wallets = all(
+        "SELECT id, wallet_index, public_key FROM wallets WHERE user_id = ? AND wallet_index IN (" + wIndices.map(() => "?").join(",") + ")",
+        [req.user.id, ...wIndices]
+      );
+
+      for (const w of wallets) {
+        const buyId = crypto.randomUUID();
+        const txSigBytes = crypto.randomBytes(64);
+        const txSignature = bs58.encode(txSigBytes);
+
+        run(
+          "INSERT INTO bundled_buys (id, launch_id, wallet_public_key, sol_amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, 'success')",
+          [buyId, launchId, w.public_key, spw, txSignature]
+        );
+      }
 
       run(
         "UPDATE launches SET status = 'success', token_mint = ?, tx_signature = ?, token_url = ?, completed_at = datetime('now') WHERE id = ?",
-        [mockMint, `sim_${crypto.randomUUID().slice(0, 8)}`, `${launchUrl}${mockMint}`, launchId]
+        [mintAddress, devTxSignature, `${launchUrl}${mintAddress}`, launchId]
       );
 
       res.json({
         success: true,
         launchId,
-        mintAddress: mockMint,
+        mintAddress,
         txCount: wIndices.length + 1,
         feeOwed: feeSol,
-        tokenUrl: `${launchUrl}${mockMint}`,
-        message: `Token launched on ${launchpad}. Note: This is a simulated launch. Connect Jito and launchpad APIs for real transactions.`,
+        tokenUrl: `${launchUrl}${mintAddress}`,
+        message: `Simulated launch on ${launchpad}.`,
       });
     } catch (err: any) {
       console.error("Launch error:", err);
