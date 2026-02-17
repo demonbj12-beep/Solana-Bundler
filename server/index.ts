@@ -60,7 +60,9 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  console.log("[v0] Starting server...");
   await registerRoutes(httpServer, app);
+  console.log("[v0] Routes registered");
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
@@ -81,8 +83,10 @@ app.use((req, res, next) => {
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
+    console.log("[v0] Setting up Vite dev server...");
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
+    console.log("[v0] Vite dev server ready");
   }
 
   // ALWAYS serve the app on the port specified in the environment variable PORT
